@@ -275,7 +275,7 @@ class ResidualAttentionBlock_MuDPT(nn.Module):
         if not self.is_first_layer:
             if len(prompts) > 0:
                 if self.is_text_layer:
-                    if nth_layer < len(prompts) - 1:
+                    if nth_layer < len(prompts):
                         prefix = x[:1, :, :]  # text: (1, 100, 512)
                         suffix = x[1 + self.prompt_nctx:, :, :]
                         text_ctx = prompts[nth_layer]
@@ -284,7 +284,7 @@ class ResidualAttentionBlock_MuDPT(nn.Module):
                         x = torch.cat([prefix, text_ctx, suffix], dim=0)
                         nth_layer += 1
                 else:
-                    if nth_layer < len(prompts) - 1:
+                    if nth_layer < len(prompts):
                         prefix = x[: x.shape[0] - self.prompt_nctx, :, :]
                         visual_ctx = prompts[nth_layer]
                         visual_ctx = visual_ctx.to(x.dtype) + torch.zeros(x.shape[1], visual_ctx.shape[0], visual_ctx.shape[1], dtype=x.dtype, device=x.device)
@@ -350,7 +350,7 @@ class ResidualAttentionBlock_MaPLe(nn.Module):
 
 
 class ResidualAttentionBlock_UMuDPT(nn.Module):
-    def __init__(self, d_model: int, n_head: int, attn_mask: torch.Tensor = None, i: int = 0, text_layer: bool = False, cfg: CfgNode = None):
+    def __init__(self, d_model: int, n_head: int, attn_mask: torch.Tensor = None, nth_layer: int = 0, is_text_layer: bool = False, cfg: CfgNode = None):
         super().__init__()
         self.attn = nn.MultiheadAttention(d_model, n_head)
         self.ln_1 = LayerNorm(d_model)
@@ -362,46 +362,41 @@ class ResidualAttentionBlock_UMuDPT(nn.Module):
         self.ln_2 = LayerNorm(d_model)
         self.attn_mask = attn_mask
 
-        self.text_layer = text_layer
-        self.prompt_nctx = cfg.TRAINER.UMUDPT.N_CTX
-        if i == 0:
-            self.first_layer = True
-        else:
-            self.first_layer = False
+        self.is_text_layer = is_text_layer
+        self.prompt_nctx = cfg.TRAINER.MUDPT.N_CTX
+        self.is_first_layer = True if nth_layer == 0 else False
 
     def attention(self, x: torch.Tensor):
         self.attn_mask = self.attn_mask.to(dtype=x.dtype, device=x.device) if self.attn_mask is not None else None
         return self.attn(x, x, x, need_weights=False, attn_mask=self.attn_mask)[0]
 
-    def forward(self, inputs):
+    def forward(self, inputs: Optional[List]):
         x = inputs[0]  # text: (77, 100, 512)  visual: (201, 16, 768)
-        prompts_deeper = inputs[1]
-        counter = inputs[2]
-
-        if not self.first_layer:
-            if len(prompts_deeper) > 0:
-                if not self.text_layer:
-                    if not (counter > len(prompts_deeper) - 1):
-                        prefix = x[0: x.shape[0] - self.prompt_nctx, :, :]
-                        visual_ctx = prompts_deeper[counter]
-                        visual_ctx = visual_ctx.to(x.dtype) + torch.zeros(x.shape[1], visual_ctx.shape[0], visual_ctx.shape[1], dtype=x.dtype, device=x.device)
-                        visual_ctx = visual_ctx.permute(1, 0, 2)
-                        x = torch.cat([prefix, visual_ctx], dim=0)
-                        counter += 1
-
-                else:
-                    if not (counter > len(prompts_deeper) - 1):
+        prompts = inputs[1]
+        nth_layer = inputs[2]
+        if not self.is_first_layer:
+            if len(prompts) > 0:
+                if self.is_text_layer:
+                    if nth_layer < len(prompts):
                         prefix = x[:1, :, :]  # text: (1, 100, 512)
                         suffix = x[1 + self.prompt_nctx:, :, :]
-                        text_ctx = prompts_deeper[counter]
+                        text_ctx = prompts[nth_layer]
                         text_ctx = text_ctx.to(x.dtype) + torch.zeros(x.shape[1], text_ctx.shape[0], text_ctx.shape[1], dtype=x.dtype, device=x.device)
                         text_ctx = text_ctx.permute(1, 0, 2)
                         x = torch.cat([prefix, text_ctx, suffix], dim=0)
-                        counter += 1
+                        nth_layer += 1
+                else:
+                    if nth_layer < len(prompts):
+                        prefix = x[: x.shape[0] - self.prompt_nctx, :, :]
+                        visual_ctx = prompts[nth_layer]
+                        visual_ctx = visual_ctx.to(x.dtype) + torch.zeros(x.shape[1], visual_ctx.shape[0], visual_ctx.shape[1], dtype=x.dtype, device=x.device)
+                        visual_ctx = visual_ctx.permute(1, 0, 2)
+                        x = torch.cat([prefix, visual_ctx], dim=0)
+                        nth_layer += 1
 
         x = x + self.attention(self.ln_1(x))  # text: (77, 100, 512)
         x = x + self.mlp(self.ln_2(x))
-        return [x, prompts_deeper, counter]
+        return [x, prompts, nth_layer]
 
 
 class Transformer(nn.Module):
