@@ -28,7 +28,16 @@ import datasets.imagenet_a
 import datasets.imagenet_r
 import datasets.imagenet_sketch
 
-from trainers import coop, cocoop, zsclip, vpt, mpt, mudpt, maple
+from trainers import (
+    coop,
+    cocoop,
+    zsclip,
+    vpt,
+    mpt,
+    mudpt,
+    maple,
+    umudpt,
+)
 
 
 def reset_cfg(cfg, args):
@@ -89,7 +98,7 @@ def extend_cfg(cfg):
     cfg.TRAINER.MPT.PREC = "fp16"  # fp16, fp32, amp
 
     cfg.TRAINER.MAPLE = CfgNode()
-    cfg.TRAINER.MAPLE.N_CTX = 2
+    cfg.TRAINER.MAPLE.N_CTX = 4
     cfg.TRAINER.MAPLE.TEXT_CTX_INIT = "a photo of a"  # initialization words
     cfg.TRAINER.MAPLE.DEEP_PROMPT_DEPTH = 9
     cfg.TRAINER.MAPLE.PREC = "fp16"  # fp16, fp32, amp
@@ -100,6 +109,13 @@ def extend_cfg(cfg):
     cfg.TRAINER.MUDPT.CTX_INIT = "a photo of a"  # initialization words
     cfg.TRAINER.MUDPT.DEEP_PROMPT_DEPTH = 9
     cfg.TRAINER.MUDPT.PREC = "fp16"  # fp16, fp32, amp
+
+    # unified multi-modal deep prompt tuning
+    cfg.TRAINER.UMUDPT = CfgNode()
+    cfg.TRAINER.UMUDPT.N_CTX = 2
+    cfg.TRAINER.UMUDPT.CTX_INIT = "a photo of a"  # initialization words
+    cfg.TRAINER.UMUDPT.DEEP_PROMPT_DEPTH = 9
+    cfg.TRAINER.UMUDPT.PREC = "fp16"  # fp16, fp32, amp
 
 
 def setup_config(args):

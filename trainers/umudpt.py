@@ -1,14 +1,12 @@
 import torch
 import sys
 sys.path.append("..")
-import copy
 import clip
 import os.path as osp
 import torch.nn as nn
-import numpy as np
 import torch.nn.functional as F
-
 from collections import OrderedDict
+from yacs.config import CfgNode
 from torch.cuda.amp import GradScaler, autocast
 from dassl.engine import TRAINER_REGISTRY, TrainerX
 from dassl.metrics import compute_accuracy
@@ -20,7 +18,7 @@ from clip.simple_tokenizer import SimpleTokenizer as Tokenizer
 _tokenizer = Tokenizer()
 
 
-def load_clip_to_cpu(cfg):
+def load_clip_to_cpu(cfg: CfgNode = None):
     if not cfg.MODEL.BACKBONE.PATH:
         backbone_name = cfg.MODEL.BACKBONE.NAME
         url = clip._MODELS[backbone_name]
@@ -32,28 +30,67 @@ def load_clip_to_cpu(cfg):
         except RuntimeError:
             state_dict = torch.load(model_path, map_location="cpu")
 
-        model = clip.build_model(state_dict or model.state_dict(), cfg=cfg)
+        model = clip.build_model(state_dict or model.state_dict())
     else:
         model_path = cfg.MODEL.BACKBONE.PATH
         print(f"Loading CLIP backbone: {cfg.MODEL.BACKBONE.NAME} from {model_path}")
-        model, preprocess = clip.load(model_path, device="cpu", cfg=cfg)
+        model, preprocess = clip.load(model_path, device="cpu")
 
     return model
 
 
-class MuDPTPromptLearner(nn.Module):
+class LayerNorm(nn.LayerNorm):
+    """Subclass torch's LayerNorm to handle fp16."""
+
+    def forward(self, x: torch.Tensor):
+        orig_type = x.dtype
+        ret = super().forward(x.type(torch.float32))
+        return ret.type(orig_type)
+
+
+class QuickGELU(nn.Module):
+    def forward(self, x: torch.Tensor):
+        return x * torch.sigmoid(1.702 * x)
+
+
+class LightTransformer(nn.Module):
+    def __init__(self,  d_model: int, n_head: int, attn_mask: torch.Tensor = None):
+        super().__init__()
+        self.attn = nn.MultiheadAttention(d_model, n_head)
+        self.ln_1 = LayerNorm(d_model)
+        self.mlp = nn.Sequential(OrderedDict([
+            ("c_fc", nn.Linear(d_model, d_model * 4)),
+            ("gelu", QuickGELU()),
+            ("c_proj", nn.Linear(d_model * 4, d_model))
+        ]))
+        self.ln_2 = LayerNorm(d_model)
+        self.attn_mask = attn_mask
+
+    def attention(self, x: torch.Tensor):
+        self.attn_mask = self.attn_mask.to(dtype=x.dtype, device=x.device) if self.attn_mask is not None else None
+        return self.attn(x, x, x, need_weights=False, attn_mask=self.attn_mask)[0]
+
+    def forward(self, x: torch.Tensor):
+        x = x + self.attention(self.ln_1(x))
+        x = x + self.mlp(self.ln_2(x))
+        return x
+
+
+class UMuDPTPromptLearner(nn.Module):
     def __init__(self, cfg, classnames, clip_model):
         super().__init__()
         n_cls = len(classnames)  # CLASS NAMES
-        n_ctx = cfg.TRAINER.MUDPT.N_CTX  # CONTEXT LENGTH
-        ctx_init = cfg.TRAINER.MUDPT.CTX_INIT  # INITIALIZE CONTEXT
+        n_ctx = cfg.TRAINER.UMUDPT.N_CTX  # CONTEXT LENGTH
+        ctx_init = cfg.TRAINER.UMUDPT.CTX_INIT  # INITIALIZE CONTEXT
         dtype = clip_model.dtype  # torch.float32
         ctx_dim = clip_model.ln_final.weight.shape[0]  # context dimension: 512
         clip_imsize = clip_model.visual.input_resolution  # clip image size: 224
         cfg_imsize = cfg.INPUT.SIZE[0]  # config image size: 224
+        visual_ctx_dim = clip_model.visual.positional_embedding.shape[1]
+        scale = ctx_dim ** -0.5
 
-        assert cfg.TRAINER.MUDPT.DEEP_PROMPT_DEPTH > 0, "PROMPT_DEPTH should be > 0"
-        self.deep_prompts_depth = cfg.TRAINER.MUDPT.DEEP_PROMPT_DEPTH
+        assert cfg.TRAINER.UMUDPT.DEEP_PROMPT_DEPTH > 0, "PROMPT_DEPTH should be > 0"
+        self.deep_prompts_depth = cfg.TRAINER.UMUDPT.DEEP_PROMPT_DEPTH
 
         assert cfg_imsize == clip_imsize, f"cfg_imsize ({cfg_imsize}) must equal to clip_imsize ({clip_imsize})"
 
@@ -71,19 +108,22 @@ class MuDPTPromptLearner(nn.Module):
             ctx_vectors = torch.empty(n_ctx, ctx_dim, dtype=dtype)
             nn.init.normal_(ctx_vectors, std=0.02)
             prompt_prefix = " ".join(['X'] * n_ctx)
-        self.ctx = nn.Parameter(ctx_vectors)  # to be optimized
+        self.text_ctx = nn.Parameter(ctx_vectors)  # to be optimized
 
         print(f'Initial context: "{prompt_prefix}"')
         print(f"Number of context words (tokens): {n_ctx}")
         print(f"Depth of deep prompt: {self.deep_prompts_depth}")
 
-        self.embed_projection = nn.Linear(in_features=ctx_dim, out_features=clip_model.visual.positional_embedding.shape[1])
+        # initialize deep prompts (n_ctx, nctx_dim)
         self.deep_prompts = nn.ParameterList([nn.Parameter(torch.empty(n_ctx, ctx_dim)) for _ in range(self.deep_prompts_depth - 1)])
         for parameter in self.deep_prompts:
             nn.init.normal_(parameter, std=0.02)
 
-        layer = nn.Linear(ctx_dim, clip_model.visual.proj.shape[0])
-        self.deep_projections = nn.ModuleList([copy.deepcopy(layer) for _ in range(self.deep_prompts_depth - 1)])
+        # light transformer for t2v prompts
+        self.ln_pre = LayerNorm(ctx_dim)
+        self.self_attn = LightTransformer(d_model=ctx_dim, n_head=ctx_dim // 64)
+        self.ln_post = LayerNorm(ctx_dim)
+        self.visual_proj = nn.Parameter(scale * torch.randn(ctx_dim, visual_ctx_dim))
 
         classnames = [name.replace("_", " ") for name in classnames]
         prompts = [prompt_prefix + " " + name + "." for name in classnames]
@@ -167,13 +207,13 @@ class TextEncoder(nn.Module):
 class CustomCLIP(nn.Module):
     def __init__(self, cfg, classnames, clip_model):
         super().__init__()
-        self.mudpt_prompt_learner = MuDPTPromptLearner(cfg, classnames, clip_model)
-        self.tokenized_prompts = self.mudpt_prompt_learner.tokenized_prompts  # (n_cls, 77)
+        self.umudpt_prompt_learner = UMuDPTPromptLearner(cfg, classnames, clip_model)
+        self.tokenized_prompts = self.umudpt_prompt_learner.tokenized_prompts  # (n_cls, 77)
         self.text_encoder = TextEncoder(clip_model)
         self.image_encoder = clip_model.visual
         self.logit_scale = clip_model.logit_scale
         self.dtype = clip_model.dtype
-        self.deep_prompts_depth = self.mudpt_prompt_learner.deep_prompts_depth
+        self.deep_prompts_depth = self.umudpt_prompt_learner.deep_prompts_depth
 
     def forward(self, image):
         tokenized_prompts = self.tokenized_prompts  # (n_cls, 77)
@@ -195,9 +235,9 @@ class CustomCLIP(nn.Module):
 
 
 @TRAINER_REGISTRY.register()
-class MuDPT(TrainerX):
+class UMuDPT(TrainerX):
     def check_cfg(self, cfg):
-        assert cfg.TRAINER.MUDPT.PREC in ["fp16", "fp32", "amp"]
+        assert cfg.TRAINER.UMUDPT.PREC in ["fp16", "fp32", "amp"]
 
     def build_model(self):
         cfg = self.cfg
@@ -206,7 +246,7 @@ class MuDPT(TrainerX):
         print(f"Loading CLIP (backbone: {cfg.MODEL.BACKBONE.NAME})")
         clip_model = load_clip_to_cpu(cfg)
 
-        if cfg.TRAINER.MUDPT.PREC in ["fp32", "amp"]:
+        if cfg.TRAINER.UMUDPT.PREC in ["fp32", "amp"]:
             clip_model.float()
 
         print(f"Building custom CLIP")
@@ -216,10 +256,7 @@ class MuDPT(TrainerX):
         name_to_optimize = "prompt_learner"
         for name, param in self.model.named_parameters():
             if name_to_optimize not in name:
-                if "visual_ctx" in name:
-                    param.requires_grad_(True)
-                else:
-                    param.requires_grad_(False)
+                param.requires_grad_(False)
 
         enabled = set()
         for name, param in self.model.named_parameters():
@@ -234,7 +271,7 @@ class MuDPT(TrainerX):
 
         self.optim = build_optimizer(self.model, cfg.OPTIM)
         self.sched = build_lr_scheduler(self.optim, cfg.OPTIM)
-        self.register_model("MultimodalDeepPromptTuning", self.model, self.optim, self.sched)
+        self.register_model("UnifiedMultimodalDeepPromptTuning", self.model, self.optim, self.sched)
         self.scaler = GradScaler() if cfg.TRAINER.MUDPT.PREC == "amp" else None
 
         device_count = torch.cuda.device_count()

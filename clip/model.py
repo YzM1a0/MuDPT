@@ -548,6 +548,51 @@ class VisionTransformer_MaPLe(nn.Module):
         return x
 
 
+class VisionTransformer_UMuDPT(nn.Module):
+    def __init__(self, input_resolution: int, patch_size: int, width: int, layers: int, heads: int, output_dim: int, cfg: CfgNode = None):
+        super().__init__()
+        self.input_resolution = input_resolution
+        self.output_dim = output_dim
+        self.conv1 = nn.Conv2d(in_channels=3, out_channels=width, kernel_size=patch_size, stride=patch_size, bias=False)
+
+        scale = width ** -0.5
+        self.class_embedding = nn.Parameter(scale * torch.randn(width))  # vit_b16: 768
+        self.positional_embedding = nn.Parameter(scale * torch.randn((input_resolution // patch_size) ** 2 + 1, width))  # vit_b16: (197, 768)
+
+        self.img_prompt = True
+        self.deep_prompts_depth = eval(f"cfg.TRAINER.{str.upper(cfg.TRAINER.NAME)}.DEEP_PROMPT_DEPTH")
+        self.ln_pre = LayerNorm(width)
+        self.transformer = Transformer(width, layers, heads, cfg=cfg)
+        self.ln_post = LayerNorm(width)
+        self.proj = nn.Parameter(scale * torch.randn(width, output_dim))
+
+    def forward(self, x: torch.Tensor, shared_ctx, compound_deeper_prompts):
+        x = self.conv1(x)  # shape = [*, width, grid, grid]
+        x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
+        x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]
+        x = torch.cat([self.class_embedding.to(x.dtype) + torch.zeros(x.shape[0], 1, x.shape[-1], dtype=x.dtype, device=x.device), x], dim=1)  # shape = [*, grid ** 2 + 1, width]
+        x = x + self.positional_embedding.to(x.dtype)
+
+        # add image prompts
+        if self.img_prompt:
+            shared_ctx = shared_ctx.to(x.dtype) + torch.zeros(x.shape[0], shared_ctx.shape[0], shared_ctx.shape[1], dtype=x.dtype, device=x.device)
+            x = torch.cat([x, shared_ctx], dim=1)  # (16, 205, 768)
+
+        x = self.ln_pre(x)
+
+        x = x.permute(1, 0, 2)  # NLD -> LND
+        output = self.transformer([x, compound_deeper_prompts, 0])
+        x = output[0]
+        x = x.permute(1, 0, 2)  # LND -> NLD
+
+        x = self.ln_post(x[:, 0, :])
+
+        if self.proj is not None:
+            x = x @ self.proj
+
+        return x
+
+
 class CLIP(nn.Module):
     def __init__(self,
                  embed_dim: int,
