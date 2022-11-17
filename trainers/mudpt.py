@@ -64,7 +64,7 @@ class MuDPTPromptLearner(nn.Module):
             with torch.no_grad():
                 embedding = clip_model.token_embedding(prompt).type(dtype)
             ctx_vectors = embedding[0, 1: 1 + n_ctx, :]
-            prompt_prefix = ctx_init[:n_ctx]
+            prompt_prefix = " ".join(ctx_init.split()[:n_ctx])
         else:
             # random initialization
             print(f"Initializing A Generic Context")

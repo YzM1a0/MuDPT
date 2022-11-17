@@ -85,7 +85,7 @@ def extend_cfg(cfg):
     cfg.TRAINER.VPT.DEEP_TEXT_N_CTX = 0
     cfg.TRAINER.VPT.DEEP_VISUAL_N_CTX = 8
     cfg.TRAINER.VPT.TEXT_PROMPT_DEPTH = 0
-    cfg.TRAINER.VPT.VISUAL_PROMPT_DEPTH = 12  # if deepth = 1, set shallow visual prompt
+    cfg.TRAINER.VPT.VISUAL_PROMPT_DEPTH = 12  # if depth = 1, set shallow visual prompt
     cfg.TRAINER.VPT.TEXT_CTX_INIT = "a photo of a"  # initialization words
     cfg.TRAINER.VPT.PREC = "fp16"  # fp16, fp32, amp
 

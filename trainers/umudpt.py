@@ -1,5 +1,6 @@
 import torch
 import sys
+
 sys.path.append("..")
 import clip
 import os.path as osp
@@ -30,11 +31,11 @@ def load_clip_to_cpu(cfg: CfgNode = None):
         except RuntimeError:
             state_dict = torch.load(model_path, map_location="cpu")
 
-        model = clip.build_model(state_dict or model.state_dict())
+        model = clip.build_model(state_dict or model.state_dict(), cfg=cfg)
     else:
         model_path = cfg.MODEL.BACKBONE.PATH
         print(f"Loading CLIP backbone: {cfg.MODEL.BACKBONE.NAME} from {model_path}")
-        model, preprocess = clip.load(model_path, device="cpu")
+        model, preprocess = clip.load(model_path, device="cpu", cfg=cfg)
 
     return model
 
@@ -54,7 +55,7 @@ class QuickGELU(nn.Module):
 
 
 class LightTransformer(nn.Module):
-    def __init__(self,  d_model: int, n_head: int, attn_mask: torch.Tensor = None):
+    def __init__(self, d_model: int, n_head: int, attn_mask: torch.Tensor = None):
         super().__init__()
         self.attn = nn.MultiheadAttention(d_model, n_head)
         self.ln_1 = LayerNorm(d_model)
@@ -101,21 +102,24 @@ class UMuDPTPromptLearner(nn.Module):
             with torch.no_grad():
                 embedding = clip_model.token_embedding(prompt).type(dtype)
             ctx_vectors = embedding[0, 1: 1 + n_ctx, :]
-            prompt_prefix = ctx_init[:n_ctx]
+            prompt_prefix = " ".join(ctx_init.split()[:n_ctx])
         else:
             # random initialization
             print(f"Initializing A Generic Context")
             ctx_vectors = torch.empty(n_ctx, ctx_dim, dtype=dtype)
             nn.init.normal_(ctx_vectors, std=0.02)
             prompt_prefix = " ".join(['X'] * n_ctx)
-        self.text_ctx = nn.Parameter(ctx_vectors)  # to be optimized
+        self.ctx = nn.Parameter(ctx_vectors)  # to be optimized
 
         print(f'Initial context: "{prompt_prefix}"')
         print(f"Number of context words (tokens): {n_ctx}")
         print(f"Depth of deep prompt: {self.deep_prompts_depth}")
 
         # initialize deep prompts (n_ctx, nctx_dim)
-        self.deep_prompts = nn.ParameterList([nn.Parameter(torch.empty(n_ctx, ctx_dim)) for _ in range(self.deep_prompts_depth - 1)])
+        self.deep_prompts = nn.ParameterList(
+            [nn.Parameter(torch.empty(n_ctx, ctx_dim)) for _ in range(self.deep_prompts_depth - 1)])
+        # self.deep_prompts = nn.Parameter(torch.empty(self.deep_prompts_depth, n_ctx, ctx_dim, dtype=dtype))
+        # nn.init.normal_(self.deep_prompts, std=0.02)
         for parameter in self.deep_prompts:
             nn.init.normal_(parameter, std=0.02)
 
@@ -123,7 +127,7 @@ class UMuDPTPromptLearner(nn.Module):
         self.ln_pre = LayerNorm(ctx_dim)
         self.self_attn = LightTransformer(d_model=ctx_dim, n_head=ctx_dim // 64)
         self.ln_post = LayerNorm(ctx_dim)
-        self.visual_proj = nn.Parameter(scale * torch.randn(ctx_dim, visual_ctx_dim))
+        self.visual_proj = nn.Linear(in_features=ctx_dim, out_features=visual_ctx_dim)
 
         classnames = [name.replace("_", " ") for name in classnames]
         prompts = [prompt_prefix + " " + name + "." for name in classnames]
@@ -136,6 +140,7 @@ class UMuDPTPromptLearner(nn.Module):
 
         self.n_cls = n_cls
         self.n_ctx = n_ctx
+        self.dtype = dtype
         self.ctx_dim = ctx_dim
         self.tokenized_prompts = tokenized_prompts  # torch.Tensor
 
@@ -166,16 +171,25 @@ class UMuDPTPromptLearner(nn.Module):
 
         prefix = self.token_prefix  # SOS
         suffix = self.token_suffix  # CLS . EOS ~
-        prompts = self.construct_prompts(ctx, prefix, suffix)
+        ctx = self.construct_prompts(ctx, prefix, suffix)
 
-        # Before returning, need to transform prompts to 768 for the visual side
+        prompts = [prompt.unsqueeze(0) for prompt in self.deep_prompts]
+        prompts.insert(0, self.ctx.unsqueeze(0))
         visual_prompts = []
-        for index, layer in enumerate(self.deep_projections):
-            visual_prompts.append(layer(self.deep_prompts[index]))
+        for i, prompt in enumerate(prompts):
+            prompt = self.ln_pre(prompt)
 
-        t2v_shared_ctx = self.embed_projection(self.ctx)
+            prompt = prompt.permute(1, 0, 2)  # (77, 100, 512)
+            prompt = self.self_attn(prompt)
+            prompt = prompt.permute(1, 0, 2)  # (100, 77, 512)
 
-        return prompts, t2v_shared_ctx, self.deep_prompts, visual_prompts
+            prompt = self.ln_post(prompt).type(self.dtype)
+
+            prompt = self.visual_proj(prompt)
+            prompt = prompt.squeeze()
+            visual_prompts.append(prompt)
+
+        return ctx, self.deep_prompts, visual_prompts
 
 
 class TextEncoder(nn.Module):
@@ -213,17 +227,13 @@ class CustomCLIP(nn.Module):
         self.image_encoder = clip_model.visual
         self.logit_scale = clip_model.logit_scale
         self.dtype = clip_model.dtype
-        self.deep_prompts_depth = self.umudpt_prompt_learner.deep_prompts_depth
 
     def forward(self, image):
         tokenized_prompts = self.tokenized_prompts  # (n_cls, 77)
-        prompts, shared_ctx, text_deep_prompts, t2v_visual_prompts = self.mudpt_prompt_learner()
+        prompts, text_deep_prompts, visual_deep_prompts = self.umudpt_prompt_learner()
 
-        image_features, text_prompts = self.image_encoder(image.type(self.dtype), t2v_visual_prompts)
-        for index in range(self.deep_prompts_depth - 1):
-            text_prompts[index] = text_deep_prompts[index] + text_prompts[index]
-
-        text_features = self.text_encoder(prompts, tokenized_prompts, text_prompts)  # (n_cls, 1024)
+        image_features = self.image_encoder(image.type(self.dtype), visual_deep_prompts[0], visual_deep_prompts[1:])
+        text_features = self.text_encoder(prompts, tokenized_prompts, text_deep_prompts)  # (n_cls, 1024)
 
         image_features = image_features / image_features.norm(dim=-1, keepdim=True)
         text_features = text_features / text_features.norm(dim=-1, keepdim=True)
@@ -272,7 +282,7 @@ class UMuDPT(TrainerX):
         self.optim = build_optimizer(self.model, cfg.OPTIM)
         self.sched = build_lr_scheduler(self.optim, cfg.OPTIM)
         self.register_model("UnifiedMultimodalDeepPromptTuning", self.model, self.optim, self.sched)
-        self.scaler = GradScaler() if cfg.TRAINER.MUDPT.PREC == "amp" else None
+        self.scaler = GradScaler() if cfg.TRAINER.UMUDPT.PREC == "amp" else None
 
         device_count = torch.cuda.device_count()
         if device_count > 1:
@@ -281,7 +291,7 @@ class UMuDPT(TrainerX):
 
     def forward_backward(self, batch):
         image, label = self.parse_batch_train(batch)
-        prec = self.cfg.TRAINER.MUDPT.PREC
+        prec = self.cfg.TRAINER.UMUDPT.PREC
 
         if prec == "amp":
             with autocast():
@@ -338,11 +348,11 @@ class UMuDPT(TrainerX):
             epoch = checkpoint["epoch"]
 
             # Ignore fixed token vectors
-            if "mudpt_prompt_learner.token_prefix" in state_dict:
-                del state_dict["mudpt_prompt_learner.token_prefix"]
+            if "umudpt_prompt_learner.token_prefix" in state_dict:
+                del state_dict["umudpt_prompt_learner.token_prefix"]
 
-            if "mudpt_prompt_learner.token_suffix" in state_dict:
-                del state_dict["mudpt_prompt_learner.token_suffix"]
+            if "umudpt_prompt_learner.token_suffix" in state_dict:
+                del state_dict["umudpt_prompt_learner.token_suffix"]
 
             print("Loading weights to {} " 'from "{}" (epoch = {})'.format(name, model_path, epoch))
 

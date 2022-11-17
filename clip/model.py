@@ -349,6 +349,61 @@ class ResidualAttentionBlock_MaPLe(nn.Module):
         return [x, compound_prompts_deeper, counter]
 
 
+class ResidualAttentionBlock_UMuDPT(nn.Module):
+    def __init__(self, d_model: int, n_head: int, attn_mask: torch.Tensor = None, i: int = 0, text_layer: bool = False, cfg: CfgNode = None):
+        super().__init__()
+        self.attn = nn.MultiheadAttention(d_model, n_head)
+        self.ln_1 = LayerNorm(d_model)
+        self.mlp = nn.Sequential(OrderedDict([
+            ("c_fc", nn.Linear(d_model, d_model * 4)),
+            ("gelu", QuickGELU()),
+            ("c_proj", nn.Linear(d_model * 4, d_model))
+        ]))
+        self.ln_2 = LayerNorm(d_model)
+        self.attn_mask = attn_mask
+
+        self.text_layer = text_layer
+        self.prompt_nctx = cfg.TRAINER.UMUDPT.N_CTX
+        if i == 0:
+            self.first_layer = True
+        else:
+            self.first_layer = False
+
+    def attention(self, x: torch.Tensor):
+        self.attn_mask = self.attn_mask.to(dtype=x.dtype, device=x.device) if self.attn_mask is not None else None
+        return self.attn(x, x, x, need_weights=False, attn_mask=self.attn_mask)[0]
+
+    def forward(self, inputs):
+        x = inputs[0]  # text: (77, 100, 512)  visual: (201, 16, 768)
+        prompts_deeper = inputs[1]
+        counter = inputs[2]
+
+        if not self.first_layer:
+            if len(prompts_deeper) > 0:
+                if not self.text_layer:
+                    if not (counter > len(prompts_deeper) - 1):
+                        prefix = x[0: x.shape[0] - self.prompt_nctx, :, :]
+                        visual_ctx = prompts_deeper[counter]
+                        visual_ctx = visual_ctx.to(x.dtype) + torch.zeros(x.shape[1], visual_ctx.shape[0], visual_ctx.shape[1], dtype=x.dtype, device=x.device)
+                        visual_ctx = visual_ctx.permute(1, 0, 2)
+                        x = torch.cat([prefix, visual_ctx], dim=0)
+                        counter += 1
+
+                else:
+                    if not (counter > len(prompts_deeper) - 1):
+                        prefix = x[:1, :, :]  # text: (1, 100, 512)
+                        suffix = x[1 + self.prompt_nctx:, :, :]
+                        text_ctx = prompts_deeper[counter]
+                        text_ctx = text_ctx.to(x.dtype) + torch.zeros(x.shape[1], text_ctx.shape[0], text_ctx.shape[1], dtype=x.dtype, device=x.device)
+                        text_ctx = text_ctx.permute(1, 0, 2)
+                        x = torch.cat([prefix, text_ctx, suffix], dim=0)
+                        counter += 1
+
+        x = x + self.attention(self.ln_1(x))  # text: (77, 100, 512)
+        x = x + self.mlp(self.ln_2(x))
+        return [x, prompts_deeper, counter]
+
+
 class Transformer(nn.Module):
     def __init__(self, width: int, layers: int, heads: int, attn_mask: torch.Tensor = None, prompt_depth: int = 0, is_text_layer: bool = False, cfg: CfgNode = None):
         super().__init__()
@@ -371,6 +426,11 @@ class Transformer(nn.Module):
             elif trainer == "MaPLe":
                 self.resblocks = nn.Sequential(*[
                     ResidualAttentionBlock_MaPLe(width, heads, attn_mask, i, is_text_layer, cfg=cfg) for i in range(layers)
+                ])
+
+            elif trainer == "UMuDPT":
+                self.resblocks = nn.Sequential(*[
+                    ResidualAttentionBlock_UMuDPT(width, heads, attn_mask, i, is_text_layer, cfg=cfg) for i in range(layers)
                 ])
 
             else:
@@ -561,12 +621,13 @@ class VisionTransformer_UMuDPT(nn.Module):
 
         self.img_prompt = True
         self.deep_prompts_depth = eval(f"cfg.TRAINER.{str.upper(cfg.TRAINER.NAME)}.DEEP_PROMPT_DEPTH")
+
         self.ln_pre = LayerNorm(width)
         self.transformer = Transformer(width, layers, heads, cfg=cfg)
         self.ln_post = LayerNorm(width)
         self.proj = nn.Parameter(scale * torch.randn(width, output_dim))
 
-    def forward(self, x: torch.Tensor, shared_ctx, compound_deeper_prompts):
+    def forward(self, x: torch.Tensor, shared_ctx, deeper_prompts):
         x = self.conv1(x)  # shape = [*, width, grid, grid]
         x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
         x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]
@@ -581,7 +642,7 @@ class VisionTransformer_UMuDPT(nn.Module):
         x = self.ln_pre(x)
 
         x = x.permute(1, 0, 2)  # NLD -> LND
-        output = self.transformer([x, compound_deeper_prompts, 0])
+        output = self.transformer([x, deeper_prompts, 0])
         x = output[0]
         x = x.permute(1, 0, 2)  # LND -> NLD
 
@@ -637,6 +698,17 @@ class CLIP(nn.Module):
 
                 elif cfg.TRAINER.NAME == "MaPLe":
                     self.visual = VisionTransformer_MaPLe(
+                        input_resolution=image_resolution,
+                        patch_size=vision_patch_size,
+                        width=vision_width,
+                        layers=vision_layers,
+                        heads=vision_heads,
+                        output_dim=embed_dim,
+                        cfg=cfg,
+                    )
+
+                elif cfg.TRAINER.NAME == "UMuDPT":
+                    self.visual = VisionTransformer_UMuDPT(
                         input_resolution=image_resolution,
                         patch_size=vision_patch_size,
                         width=vision_width,
