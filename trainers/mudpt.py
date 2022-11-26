@@ -1,14 +1,11 @@
 import torch
 import sys
 sys.path.append("..")
-import copy
 import clip
 import os.path as osp
 import torch.nn as nn
-import numpy as np
-import torch.nn.functional as F
 
-from collections import OrderedDict
+import torch.nn.functional as F
 from torch.cuda.amp import GradScaler, autocast
 from dassl.engine import TRAINER_REGISTRY, TrainerX
 from dassl.metrics import compute_accuracy
@@ -78,12 +75,10 @@ class MuDPTPromptLearner(nn.Module):
         print(f"Depth of deep prompt: {self.deep_prompts_depth}")
 
         self.embed_projection = nn.Linear(in_features=ctx_dim, out_features=clip_model.visual.positional_embedding.shape[1])
-        self.deep_prompts = nn.ParameterList([nn.Parameter(torch.empty(n_ctx, ctx_dim)) for _ in range(self.deep_prompts_depth - 1)])
-        for parameter in self.deep_prompts:
-            nn.init.normal_(parameter, std=0.02)
+        self.deep_prompts = nn.Parameter(torch.empty(self.deep_prompts_depth - 1, n_ctx, ctx_dim))
+        nn.init.normal_(self.deep_prompts, std=0.02)
 
-        layer = nn.Linear(ctx_dim, clip_model.visual.proj.shape[0])
-        self.deep_projections = nn.ModuleList([copy.deepcopy(layer) for _ in range(self.deep_prompts_depth - 1)])
+        self.deep_projections = nn.Linear(ctx_dim, clip_model.visual.proj.shape[0])
 
         classnames = [name.replace("_", " ") for name in classnames]
         prompts = [prompt_prefix + " " + name + "." for name in classnames]
@@ -129,11 +124,8 @@ class MuDPTPromptLearner(nn.Module):
         prompts = self.construct_prompts(ctx, prefix, suffix)
 
         # Before returning, need to transform prompts to 768 for the visual side
-        visual_prompts = []
-        for index, layer in enumerate(self.deep_projections):
-            visual_prompts.append(layer(self.deep_prompts[index]))
-
-        t2v_shared_ctx = self.embed_projection(self.ctx)
+        visual_prompts = self.deep_projections(self.deep_prompts)
+        t2v_shared_ctx = self.embed_projection(self.ctx.unsqueeze(0))
 
         return prompts, t2v_shared_ctx, self.deep_prompts, visual_prompts
 
@@ -179,10 +171,8 @@ class CustomCLIP(nn.Module):
         tokenized_prompts = self.tokenized_prompts  # (n_cls, 77)
         prompts, shared_ctx, text_deep_prompts, t2v_visual_prompts = self.mudpt_prompt_learner()
 
-        image_features, text_prompts = self.image_encoder(image.type(self.dtype), t2v_visual_prompts)
-        for index in range(self.deep_prompts_depth - 1):
-            text_prompts[index] = text_deep_prompts[index] + text_prompts[index]
-
+        image_features, text_prompts = self.image_encoder(image.type(self.dtype), shared_ctx, t2v_visual_prompts)
+        text_prompts = text_deep_prompts + text_prompts
         text_features = self.text_encoder(prompts, tokenized_prompts, text_prompts)  # (n_cls, 1024)
 
         image_features = image_features / image_features.norm(dim=-1, keepdim=True)
@@ -262,7 +252,7 @@ class MuDPT(TrainerX):
 
         loss_summary = {
             "loss": loss.item(),
-            "acc": compute_accuracy(output, label)[0].item(),
+            # "acc": compute_accuracy(output, label)[0].item(),
         }
 
         if (self.batch_idx + 1) == self.num_batches:

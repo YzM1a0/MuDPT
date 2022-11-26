@@ -37,7 +37,22 @@ from trainers import (
     mudpt,
     maple,
     umudpt,
+    uumudpt,
 )
+
+
+def print_args(args, cfg):
+    print("***************")
+    print("** Arguments **")
+    print("***************")
+    optkeys = list(args.__dict__.keys())
+    optkeys.sort()
+    for key in optkeys:
+        print("{}: {}".format(key, args.__dict__[key]))
+    print("************")
+    print("** Config **")
+    print("************")
+    print(cfg)
 
 
 def reset_cfg(cfg, args):
@@ -83,39 +98,46 @@ def extend_cfg(cfg):
 
     cfg.TRAINER.VPT = CfgNode()
     cfg.TRAINER.VPT.DEEP_TEXT_N_CTX = 0
-    cfg.TRAINER.VPT.DEEP_VISUAL_N_CTX = 8
+    cfg.TRAINER.VPT.DEEP_VISUAL_N_CTX = 0
     cfg.TRAINER.VPT.TEXT_PROMPT_DEPTH = 0
-    cfg.TRAINER.VPT.VISUAL_PROMPT_DEPTH = 12  # if depth = 1, set shallow visual prompt
+    cfg.TRAINER.VPT.VISUAL_PROMPT_DEPTH = 0  # if depth = 1, set shallow visual prompt
     cfg.TRAINER.VPT.TEXT_CTX_INIT = "a photo of a"  # initialization words
     cfg.TRAINER.VPT.PREC = "fp16"  # fp16, fp32, amp
 
     cfg.TRAINER.MPT = CfgNode()
-    cfg.TRAINER.MPT.DEEP_TEXT_N_CTX = 4
-    cfg.TRAINER.MPT.DEEP_VISUAL_N_CTX = 4
-    cfg.TRAINER.MPT.TEXT_PROMPT_DEPTH = 8
-    cfg.TRAINER.MPT.VISUAL_PROMPT_DEPTH = 8
+    cfg.TRAINER.MPT.DEEP_TEXT_N_CTX = 0
+    cfg.TRAINER.MPT.DEEP_VISUAL_N_CTX = 0
+    cfg.TRAINER.MPT.TEXT_PROMPT_DEPTH = 0
+    cfg.TRAINER.MPT.VISUAL_PROMPT_DEPTH = 0
     cfg.TRAINER.MPT.TEXT_CTX_INIT = "a photo of a"  # initialization words
     cfg.TRAINER.MPT.PREC = "fp16"  # fp16, fp32, amp
 
     cfg.TRAINER.MAPLE = CfgNode()
-    cfg.TRAINER.MAPLE.N_CTX = 4
+    cfg.TRAINER.MAPLE.N_CTX = 0
     cfg.TRAINER.MAPLE.TEXT_CTX_INIT = "a photo of a"  # initialization words
-    cfg.TRAINER.MAPLE.DEEP_PROMPT_DEPTH = 9
+    cfg.TRAINER.MAPLE.DEEP_PROMPT_DEPTH = 0
     cfg.TRAINER.MAPLE.PREC = "fp16"  # fp16, fp32, amp
 
     # MuDPT config
     cfg.TRAINER.MUDPT = CfgNode()
     cfg.TRAINER.MUDPT.N_CTX = 2
     cfg.TRAINER.MUDPT.CTX_INIT = "a photo of a"  # initialization words
-    cfg.TRAINER.MUDPT.DEEP_PROMPT_DEPTH = 9
+    cfg.TRAINER.MUDPT.DEEP_PROMPT_DEPTH = 8
     cfg.TRAINER.MUDPT.PREC = "fp16"  # fp16, fp32, amp
 
     # unified multi-modal deep prompt tuning
     cfg.TRAINER.UMUDPT = CfgNode()
     cfg.TRAINER.UMUDPT.N_CTX = 2
     cfg.TRAINER.UMUDPT.CTX_INIT = "a photo of a"  # initialization words
-    cfg.TRAINER.UMUDPT.DEEP_PROMPT_DEPTH = 9
+    cfg.TRAINER.UMUDPT.DEEP_PROMPT_DEPTH = 8
     cfg.TRAINER.UMUDPT.PREC = "fp16"  # fp16, fp32, amp
+
+    # unified multi-modal deep prompt tuning
+    cfg.TRAINER.UUMUDPT = CfgNode()
+    cfg.TRAINER.UUMUDPT.N_CTX = 2
+    cfg.TRAINER.UUMUDPT.CTX_INIT = "a photo of a"  # initialization words
+    cfg.TRAINER.UUMUDPT.DEEP_PROMPT_DEPTH = 8
+    cfg.TRAINER.UUMUDPT.PREC = "fp16"  # fp16, fp32, amp
 
 
 def setup_config(args):
@@ -146,6 +168,7 @@ def main(args):
     if torch.cuda.is_available() and cfg.USE_CUDA:
         torch.backends.cudnn.benchmark = True
 
+    print_args(args, cfg)
     trainer = build_trainer(cfg)
 
     if args.eval_only:

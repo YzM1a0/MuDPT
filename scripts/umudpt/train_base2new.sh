@@ -5,29 +5,25 @@
 #SBATCH -p gpu
 #SBATCH --gres=gpu:2
 #SBATCH --no-requeue
-#SBATCH --output=base2new_new.out
+#SBATCH --output=base2new.out
 
 source activate py37_coop
 
-PROJ_PATH="/data01/home/scy0037/run/myz/MuDPT"
-DATA="${PROJ_PATH}/datasets"
+PROJ_PATH="E:/work4_MuDPT/MuDPT"
+DATA="E:/Datasets/VisualClassification"
+TRAINER="UMuDPT"
 
-TRAINER="MPT"
-CFG="vit_b16_c2_ep5_batch4"
+CFG="vit_b16_bz4_ep5_nctx2_depth9"
 BACKBONE_PATH="${PROJ_PATH}/pretrained/ViT-B-16.pt"
-TEXT_N_CTX=2
-DEEP_TEXT_N_CTX=2
-DEEP_IMG_N_CTX=2
-TEXT_PROMPT_DEPTH=12
-IMG_PROMPT_DEPTH=12
+N_CTX=2
+DEEP_PROMPT_DEPTH=9
 SHOTS=16
 SEED=2
 
-#
 for DATASET in oxford_pets oxford_flowers fgvc_aircraft dtd eurosat stanford_cars food101 caltech101 ucf101 imagenet sun397
 do
-  MODEL_DIR=output/base2new/base/${DATASET}/shots_${SHOTS}/${CFG}_vctx${DEEP_IMG_N_CTX}_tctx${DEEP_TEXT_N_CTX}_vdepth${IMG_PROMPT_DEPTH}_tdepth${TEXT_PROMPT_DEPTH}/seed${SEED}
-  OUTPUT_DIR=output/base2new/new/${DATASET}/shots_${SHOTS}/${CFG}_vctx${DEEP_IMG_N_CTX}_tctx${DEEP_TEXT_N_CTX}_vdepth${IMG_PROMPT_DEPTH}_tdepth${TEXT_PROMPT_DEPTH}/seed${SEED}
+  DIR=output/base2new/base/${DATASET}/shots_${SHOTS}/${CFG}_nctx${N_CTX}_depth${DEEP_PROMPT_DEPTH}/seed${SEED}
+
   if [ -d "$DIR" ]; then
       echo "Oops! The results exist at ${DIR} (so skip this job)"
   else
@@ -37,12 +33,9 @@ do
       --seed ${SEED} \
       --dataset_config "${PROJ_PATH}/configs/datasets/${DATASET}.yaml" \
       --trainer_config "${PROJ_PATH}/configs/trainers/${TRAINER}/${CFG}.yaml" \
-      --output_dir ${OUTPUT_DIR} \
-      --model_dir ${MODEL_DIR} \
-      --load_epoch 5 \
-      --eval_only \
+      --output_dir ${DIR} \
       DATASET.NUM_SHOTS ${SHOTS} \
       MODEL.BACKBONE.PATH ${BACKBONE_PATH} \
-      DATASET.SUBSAMPLE_CLASSES "new"
+      DATASET.SUBSAMPLE_CLASSES "base"
   fi
 done

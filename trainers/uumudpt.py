@@ -10,6 +10,7 @@ from collections import OrderedDict
 from yacs.config import CfgNode
 from torch.cuda.amp import GradScaler, autocast
 from dassl.engine import TRAINER_REGISTRY, TrainerX
+from dassl.metrics import compute_accuracy
 from dassl.utils import load_pretrained_weights, load_checkpoint
 from dassl.optim import build_optimizer, build_lr_scheduler
 
@@ -76,20 +77,20 @@ class LightTransformer(nn.Module):
         return x
 
 
-class UMuDPTPromptLearner(nn.Module):
+class UUMuDPTPromptLearner(nn.Module):
     def __init__(self, cfg, classnames, clip_model):
         super().__init__()
         n_cls = len(classnames)  # CLASS NAMES
-        n_ctx = cfg.TRAINER.UMUDPT.N_CTX  # CONTEXT LENGTH
-        ctx_init = cfg.TRAINER.UMUDPT.CTX_INIT  # INITIALIZE CONTEXT
+        n_ctx = cfg.TRAINER.UUMUDPT.N_CTX  # CONTEXT LENGTH
+        ctx_init = cfg.TRAINER.UUMUDPT.CTX_INIT  # INITIALIZE CONTEXT
         dtype = clip_model.dtype  # torch.float32
         ctx_dim = clip_model.ln_final.weight.shape[0]  # context dimension: 512
         clip_imsize = clip_model.visual.input_resolution  # clip image size: 224
         cfg_imsize = cfg.INPUT.SIZE[0]  # config image size: 224
         visual_ctx_dim = clip_model.visual.positional_embedding.shape[1]
 
-        assert cfg.TRAINER.UMUDPT.DEEP_PROMPT_DEPTH > 0, "PROMPT_DEPTH should be > 0"
-        self.deep_prompts_depth = cfg.TRAINER.UMUDPT.DEEP_PROMPT_DEPTH
+        assert cfg.TRAINER.UUMUDPT.DEEP_PROMPT_DEPTH > 0, "PROMPT_DEPTH should be > 0"
+        self.deep_prompts_depth = cfg.TRAINER.UUMUDPT.DEEP_PROMPT_DEPTH
 
         assert cfg_imsize == clip_imsize, f"cfg_imsize ({cfg_imsize}) must equal to clip_imsize ({clip_imsize})"
 
@@ -159,7 +160,7 @@ class UMuDPTPromptLearner(nn.Module):
         return prompts
 
     def forward(self):
-        ctx = self.ctx  # context parameters
+        ctx = self.ctx  # context parameters (n_ctx, ctx_dim)
         if ctx.dim() == 2:  # generic context (n_ctx, n_dim)
             ctx = ctx.unsqueeze(0).expand(self.n_cls, self.n_ctx, self.ctx_dim)
 
@@ -167,6 +168,7 @@ class UMuDPTPromptLearner(nn.Module):
         suffix = self.token_suffix  # CLS . EOS ~
         ctx = self.construct_prompts(ctx, prefix, suffix)
 
+        # textual prompts to visual prompts
         visual_prompts = torch.cat([self.ctx.unsqueeze(0), self.deep_prompts], dim=0)
         visual_prompts = self.ln_pre(visual_prompts)
         visual_prompts = visual_prompts.permute(1, 0, 2)
@@ -207,8 +209,8 @@ class TextEncoder(nn.Module):
 class CustomCLIP(nn.Module):
     def __init__(self, cfg, classnames, clip_model):
         super().__init__()
-        self.umudpt_prompt_learner = UMuDPTPromptLearner(cfg, classnames, clip_model)
-        self.tokenized_prompts = self.umudpt_prompt_learner.tokenized_prompts  # (n_cls, 77)
+        self.uumudpt_prompt_learner = UUMuDPTPromptLearner(cfg, classnames, clip_model)
+        self.tokenized_prompts = self.uumudpt_prompt_learner.tokenized_prompts  # (n_cls, 77)
         self.text_encoder = TextEncoder(clip_model)
         self.image_encoder = clip_model.visual
         self.logit_scale = clip_model.logit_scale
@@ -216,9 +218,10 @@ class CustomCLIP(nn.Module):
 
     def forward(self, image):
         tokenized_prompts = self.tokenized_prompts  # (n_cls, 77)
-        prompts, text_deep_prompts, visual_deep_prompts = self.umudpt_prompt_learner()
+        prompts, text_deep_prompts, visual_deep_prompts = self.uumudpt_prompt_learner()
 
-        image_features = self.image_encoder(image.type(self.dtype), visual_deep_prompts[:1, :, :], visual_deep_prompts[1:, :, :])
+        image_features, textual_prompts = self.image_encoder(image.type(self.dtype), visual_deep_prompts[:1, :, :], visual_deep_prompts[1:, :, :])
+        text_deep_prompts = text_deep_prompts + textual_prompts
         text_features = self.text_encoder(prompts, tokenized_prompts, text_deep_prompts)  # (n_cls, 1024)
 
         image_features = image_features / image_features.norm(dim=-1, keepdim=True)
@@ -231,9 +234,9 @@ class CustomCLIP(nn.Module):
 
 
 @TRAINER_REGISTRY.register()
-class UMuDPT(TrainerX):
+class UUMuDPT(TrainerX):
     def check_cfg(self, cfg):
-        assert cfg.TRAINER.UMUDPT.PREC in ["fp16", "fp32", "amp"]
+        assert cfg.TRAINER.UUMUDPT.PREC in ["fp16", "fp32", "amp"]
 
     def build_model(self):
         cfg = self.cfg
@@ -242,7 +245,7 @@ class UMuDPT(TrainerX):
         print(f"Loading CLIP (backbone: {cfg.MODEL.BACKBONE.NAME})")
         clip_model = load_clip_to_cpu(cfg)
 
-        if cfg.TRAINER.UMUDPT.PREC in ["fp32", "amp"]:
+        if cfg.TRAINER.UUMUDPT.PREC in ["fp32", "amp"]:
             clip_model.float()
 
         print(f"Building custom CLIP")
@@ -252,7 +255,10 @@ class UMuDPT(TrainerX):
         name_to_optimize = "prompt_learner"
         for name, param in self.model.named_parameters():
             if name_to_optimize not in name:
-                param.requires_grad_(False)
+                if "visual_ctx" in name:
+                    param.requires_grad_(True)
+                else:
+                    param.requires_grad_(False)
 
         enabled = set()
         for name, param in self.model.named_parameters():
@@ -268,7 +274,7 @@ class UMuDPT(TrainerX):
         self.optim = build_optimizer(self.model, cfg.OPTIM)
         self.sched = build_lr_scheduler(self.optim, cfg.OPTIM)
         self.register_model("UnifiedMultimodalDeepPromptTuning", self.model, self.optim, self.sched)
-        self.scaler = GradScaler() if cfg.TRAINER.UMUDPT.PREC == "amp" else None
+        self.scaler = GradScaler() if cfg.TRAINER.UUMUDPT.PREC == "amp" else None
 
         device_count = torch.cuda.device_count()
         if device_count > 1:
@@ -277,7 +283,7 @@ class UMuDPT(TrainerX):
 
     def forward_backward(self, batch):
         image, label = self.parse_batch_train(batch)
-        prec = self.cfg.TRAINER.UMUDPT.PREC
+        prec = self.cfg.TRAINER.UUMUDPT.PREC
 
         if prec == "amp":
             with autocast():
@@ -334,11 +340,11 @@ class UMuDPT(TrainerX):
             epoch = checkpoint["epoch"]
 
             # Ignore fixed token vectors
-            if "umudpt_prompt_learner.token_prefix" in state_dict:
-                del state_dict["umudpt_prompt_learner.token_prefix"]
+            if "uumudpt_prompt_learner.token_prefix" in state_dict:
+                del state_dict["uumudpt_prompt_learner.token_prefix"]
 
-            if "umudpt_prompt_learner.token_suffix" in state_dict:
-                del state_dict["umudpt_prompt_learner.token_suffix"]
+            if "uumudpt_prompt_learner.token_suffix" in state_dict:
+                del state_dict["uumudpt_prompt_learner.token_suffix"]
 
             print("Loading weights to {} " 'from "{}" (epoch = {})'.format(name, model_path, epoch))
 

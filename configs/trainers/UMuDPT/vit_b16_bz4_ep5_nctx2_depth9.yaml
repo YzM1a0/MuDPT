@@ -27,7 +27,7 @@ TRAIN:
 MODEL:
   BACKBONE:
     NAME: "ViT-B/16"
-    PATH: "E:/work1_MuDPT/MuDPT/pretrained/ViT-B-16.pt"
+    PATH: "E:/work5_MuDPT/MuDPT/pretrained/ViT-B-16.pt"
 
 TRAINER:
   MAPLE:

@@ -1,3 +1,5 @@
+import sys
+sys.path.append("..")
 from collections import OrderedDict
 from typing import Tuple, Union
 from yacs.config import CfgNode
@@ -8,6 +10,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from typing import Optional, List
+from trainers.uumudpt import LightTransformer
 
 
 class Bottleneck(nn.Module):
@@ -261,7 +264,7 @@ class ResidualAttentionBlock_MuDPT(nn.Module):
         self.attn_mask = attn_mask
 
         self.is_text_layer = is_text_layer
-        self.prompt_nctx = cfg.TRAINER.MUDPT.N_CTX
+        self.prompt_nctx = eval(f"cfg.TRAINER.{str.upper(cfg.TRAINER.NAME)}.N_CTX")
         self.is_first_layer = True if nth_layer == 0 else False
 
     def attention(self, x: torch.Tensor):
@@ -273,21 +276,21 @@ class ResidualAttentionBlock_MuDPT(nn.Module):
         prompts = inputs[1]
         nth_layer = inputs[2]
         if not self.is_first_layer:
-            if len(prompts) > 0:
+            if prompts.shape[0] > 0:
                 if self.is_text_layer:
-                    if nth_layer < len(prompts):
+                    if nth_layer < prompts.shape[0]:
                         prefix = x[:1, :, :]  # text: (1, 100, 512)
                         suffix = x[1 + self.prompt_nctx:, :, :]
-                        text_ctx = prompts[nth_layer]
-                        text_ctx = text_ctx.to(x.dtype) + torch.zeros(x.shape[1], text_ctx.shape[0], text_ctx.shape[1], dtype=x.dtype, device=x.device)
+                        text_ctx = prompts[nth_layer: nth_layer + 1, :, :]
+                        text_ctx = text_ctx.expand(x.shape[1], -1, -1).to(x.dtype).to(x.device)
                         text_ctx = text_ctx.permute(1, 0, 2)
                         x = torch.cat([prefix, text_ctx, suffix], dim=0)
                         nth_layer += 1
                 else:
-                    if nth_layer < len(prompts):
+                    if nth_layer < prompts.shape[0]:
                         prefix = x[: x.shape[0] - self.prompt_nctx, :, :]
-                        visual_ctx = prompts[nth_layer]
-                        visual_ctx = visual_ctx.to(x.dtype) + torch.zeros(x.shape[1], visual_ctx.shape[0], visual_ctx.shape[1], dtype=x.dtype, device=x.device)
+                        visual_ctx = prompts[nth_layer: nth_layer + 1, :, :]
+                        visual_ctx = visual_ctx.expand(x.shape[1], -1, -1).to(x.dtype).to(x.device)
                         visual_ctx = visual_ctx.permute(1, 0, 2)
                         x = torch.cat([prefix, visual_ctx], dim=0)
                         nth_layer += 1
@@ -363,7 +366,7 @@ class ResidualAttentionBlock_UMuDPT(nn.Module):
         self.attn_mask = attn_mask
 
         self.is_text_layer = is_text_layer
-        self.prompt_nctx = cfg.TRAINER.MUDPT.N_CTX
+        self.prompt_nctx = eval(f"cfg.TRAINER.{str.upper(cfg.TRAINER.NAME)}.N_CTX")
         self.is_first_layer = True if nth_layer == 0 else False
 
     def attention(self, x: torch.Tensor):
@@ -375,21 +378,71 @@ class ResidualAttentionBlock_UMuDPT(nn.Module):
         prompts = inputs[1]
         nth_layer = inputs[2]
         if not self.is_first_layer:
-            if len(prompts) > 0:
+            if prompts.shape[0] > 0:
                 if self.is_text_layer:
-                    if nth_layer < len(prompts):
+                    if nth_layer < prompts.shape[0]:
                         prefix = x[:1, :, :]  # text: (1, 100, 512)
                         suffix = x[1 + self.prompt_nctx:, :, :]
-                        text_ctx = prompts[nth_layer]
-                        text_ctx = text_ctx.to(x.dtype) + torch.zeros(x.shape[1], text_ctx.shape[0], text_ctx.shape[1], dtype=x.dtype, device=x.device)
+                        text_ctx = prompts[nth_layer: nth_layer + 1, :, :]
+                        text_ctx = text_ctx.expand(x.shape[1], -1, -1).to(x.dtype).to(x.device)
                         text_ctx = text_ctx.permute(1, 0, 2)
                         x = torch.cat([prefix, text_ctx, suffix], dim=0)
                         nth_layer += 1
                 else:
-                    if nth_layer < len(prompts):
+                    if nth_layer < prompts.shape[0]:
                         prefix = x[: x.shape[0] - self.prompt_nctx, :, :]
-                        visual_ctx = prompts[nth_layer]
-                        visual_ctx = visual_ctx.to(x.dtype) + torch.zeros(x.shape[1], visual_ctx.shape[0], visual_ctx.shape[1], dtype=x.dtype, device=x.device)
+                        visual_ctx = prompts[nth_layer: nth_layer + 1, :, :]
+                        visual_ctx = visual_ctx.expand(x.shape[1], -1, -1).to(x.dtype).to(x.device)
+                        visual_ctx = visual_ctx.permute(1, 0, 2)
+                        x = torch.cat([prefix, visual_ctx], dim=0)
+                        nth_layer += 1
+
+        x = x + self.attention(self.ln_1(x))  # text: (77, 100, 512)
+        x = x + self.mlp(self.ln_2(x))
+        return [x, prompts, nth_layer]
+
+
+class ResidualAttentionBlock_UUMuDPT(nn.Module):
+    def __init__(self, d_model: int, n_head: int, attn_mask: torch.Tensor = None, nth_layer: int = 0, is_text_layer: bool = False, cfg: CfgNode = None):
+        super().__init__()
+        self.attn = nn.MultiheadAttention(d_model, n_head)
+        self.ln_1 = LayerNorm(d_model)
+        self.mlp = nn.Sequential(OrderedDict([
+            ("c_fc", nn.Linear(d_model, d_model * 4)),
+            ("gelu", QuickGELU()),
+            ("c_proj", nn.Linear(d_model * 4, d_model))
+        ]))
+        self.ln_2 = LayerNorm(d_model)
+        self.attn_mask = attn_mask
+
+        self.is_text_layer = is_text_layer
+        self.prompt_nctx = eval(f"cfg.TRAINER.{str.upper(cfg.TRAINER.NAME)}.N_CTX")
+        self.is_first_layer = True if nth_layer == 0 else False
+
+    def attention(self, x: torch.Tensor):
+        self.attn_mask = self.attn_mask.to(dtype=x.dtype, device=x.device) if self.attn_mask is not None else None
+        return self.attn(x, x, x, need_weights=False, attn_mask=self.attn_mask)[0]
+
+    def forward(self, inputs: Optional[List]):
+        x = inputs[0]  # text: (77, 100, 512)  visual: (201, 16, 768)
+        prompts = inputs[1]
+        nth_layer = inputs[2]
+        if not self.is_first_layer:
+            if prompts.shape[0] > 0:
+                if self.is_text_layer:
+                    if nth_layer < prompts.shape[0]:
+                        prefix = x[:1, :, :]  # text: (1, 100, 512)
+                        suffix = x[1 + self.prompt_nctx:, :, :]
+                        text_ctx = prompts[nth_layer: nth_layer + 1, :, :]
+                        text_ctx = text_ctx.expand(x.shape[1], -1, -1).to(x.dtype).to(x.device)
+                        text_ctx = text_ctx.permute(1, 0, 2)
+                        x = torch.cat([prefix, text_ctx, suffix], dim=0)
+                        nth_layer += 1
+                else:
+                    if nth_layer < prompts.shape[0]:
+                        prefix = x[: x.shape[0] - self.prompt_nctx, :, :]
+                        visual_ctx = prompts[nth_layer: nth_layer + 1, :, :]
+                        visual_ctx = visual_ctx.expand(x.shape[1], -1, -1).to(x.dtype).to(x.device)
                         visual_ctx = visual_ctx.permute(1, 0, 2)
                         x = torch.cat([prefix, visual_ctx], dim=0)
                         nth_layer += 1
@@ -426,6 +479,11 @@ class Transformer(nn.Module):
             elif trainer == "UMuDPT":
                 self.resblocks = nn.Sequential(*[
                     ResidualAttentionBlock_UMuDPT(width, heads, attn_mask, i, is_text_layer, cfg=cfg) for i in range(layers)
+                ])
+
+            elif trainer == "UUMuDPT":
+                self.resblocks = nn.Sequential(*[
+                    ResidualAttentionBlock_UUMuDPT(width, heads, attn_mask, i, is_text_layer, cfg=cfg) for i in range(layers)
                 ])
 
             else:
@@ -505,26 +563,23 @@ class VisionTransformer_MuDPT(nn.Module):
         self.class_embedding = nn.Parameter(scale * torch.randn(width))  # vit_b16: 768
         self.positional_embedding = nn.Parameter(scale * torch.randn((input_resolution // patch_size) ** 2 + 1, width))  # vit_b16: (197, 768)
 
-        self.img_prompt = True
         self.deep_prompts_depth = eval(f"cfg.TRAINER.{str.upper(cfg.TRAINER.NAME)}.DEEP_PROMPT_DEPTH")
-        n_ctx = cfg.TRAINER.MUDPT.N_CTX
+        n_ctx = eval(f"cfg.TRAINER.{str.upper(cfg.TRAINER.NAME)}.N_CTX")
         ctx_vectors = torch.empty(n_ctx, width)
         nn.init.normal_(ctx_vectors, std=0.02)
         self.visual_ctx = nn.Parameter(ctx_vectors)
 
-        self.visual_ctx_deep_prompts = nn.ParameterList([nn.Parameter(torch.empty(n_ctx, width)) for _ in range(self.deep_prompts_depth - 1)])
-        for parameter in self.visual_ctx_deep_prompts:
-            nn.init.normal_(parameter, std=0.02)
+        self.visual_ctx_deep_prompts = nn.Parameter(torch.empty(self.deep_prompts_depth - 1, n_ctx, width))
+        nn.init.normal_(self.visual_ctx_deep_prompts, std=0.02)
 
-        layer = nn.Linear(in_features=width, out_features=output_dim)
-        self.visual_ctx_deep_projections = nn.ModuleList([copy.deepcopy(layer) for _ in range(self.deep_prompts_depth - 1)])
+        self.visual_ctx_deep_projections = nn.Linear(in_features=width, out_features=output_dim)
 
         self.ln_pre = LayerNorm(width)
         self.transformer = Transformer(width, layers, heads, cfg=cfg)
         self.ln_post = LayerNorm(width)
         self.proj = nn.Parameter(scale * torch.randn(width, output_dim))
 
-    def forward(self, x: torch.Tensor, t2v_visual_prompts):
+    def forward(self, x: torch.Tensor, shared_prompt, t2v_visual_prompts):
         x = self.conv1(x)  # shape = [*, width, grid, grid]
         x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
         x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]
@@ -532,21 +587,17 @@ class VisionTransformer_MuDPT(nn.Module):
         x = x + self.positional_embedding.to(x.dtype)
 
         # add image prompts
-        if self.img_prompt:
-            shared_ctx = self.visual_ctx
-            shared_ctx = shared_ctx.to(x.dtype) + torch.zeros(x.shape[0], shared_ctx.shape[0], shared_ctx.shape[1], dtype=x.dtype, device=x.device)
-            x = torch.cat([x, shared_ctx], dim=1)  # (16, 205, 768)
-            for index in range(self.deep_prompts_depth - 1):
-                t2v_visual_prompts[index] = t2v_visual_prompts[index] + self.visual_ctx_deep_prompts[index]
+        visual_prompt = self.visual_ctx.unsqueeze(0) + shared_prompt
+        visual_prompt = visual_prompt.expand(x.shape[0], -1, -1).to(x.dtype).to(x.device)
+        x = torch.cat([x, visual_prompt], dim=1)  # (16, 205, 768)
+        visual_deep_prompts = t2v_visual_prompts + self.visual_ctx_deep_prompts
 
-        text_prompts = []
-        for index, layer in enumerate(self.visual_ctx_deep_projections):
-            text_prompts.append(layer(self.visual_ctx_deep_prompts[index]))
+        text_prompts = self.visual_ctx_deep_projections(self.visual_ctx_deep_prompts)
 
         x = self.ln_pre(x)
 
         x = x.permute(1, 0, 2)  # NLD -> LND
-        output = self.transformer([x, t2v_visual_prompts, 0])
+        output = self.transformer([x, visual_deep_prompts, 0])
         x = output[0]
         x = x.permute(1, 0, 2)  # LND -> NLD
 
@@ -614,7 +665,6 @@ class VisionTransformer_UMuDPT(nn.Module):
         self.class_embedding = nn.Parameter(scale * torch.randn(width))  # vit_b16: 768
         self.positional_embedding = nn.Parameter(scale * torch.randn((input_resolution // patch_size) ** 2 + 1, width))  # vit_b16: (197, 768)
 
-        self.img_prompt = True
         self.deep_prompts_depth = eval(f"cfg.TRAINER.{str.upper(cfg.TRAINER.NAME)}.DEEP_PROMPT_DEPTH")
 
         self.ln_pre = LayerNorm(width)
@@ -630,9 +680,8 @@ class VisionTransformer_UMuDPT(nn.Module):
         x = x + self.positional_embedding.to(x.dtype)
 
         # add image prompts
-        if self.img_prompt:
-            shared_ctx = shared_ctx.to(x.dtype) + torch.zeros(x.shape[0], shared_ctx.shape[0], shared_ctx.shape[1], dtype=x.dtype, device=x.device)
-            x = torch.cat([x, shared_ctx], dim=1)  # (16, 205, 768)
+        shared_ctx = shared_ctx.expand(x.shape[0], -1, -1).to(x.dtype).to(x.device)
+        x = torch.cat([x, shared_ctx], dim=1)  # (16, 205, 768)
 
         x = self.ln_pre(x)
 
@@ -647,6 +696,73 @@ class VisionTransformer_UMuDPT(nn.Module):
             x = x @ self.proj
 
         return x
+
+
+class VisionTransformer_UUMuDPT(nn.Module):
+    def __init__(self, input_resolution: int, patch_size: int, width: int, layers: int, heads: int, output_dim: int, cfg: CfgNode = None):
+        super().__init__()
+        self.input_resolution = input_resolution
+        self.output_dim = output_dim
+        self.conv1 = nn.Conv2d(in_channels=3, out_channels=width, kernel_size=patch_size, stride=patch_size, bias=False)
+
+        scale = width ** -0.5
+        self.class_embedding = nn.Parameter(scale * torch.randn(width))  # vit_b16: 768
+        self.positional_embedding = nn.Parameter(scale * torch.randn((input_resolution // patch_size) ** 2 + 1, width))  # vit_b16: (197, 768)
+
+        self.deep_prompts_depth = eval(f"cfg.TRAINER.{str.upper(cfg.TRAINER.NAME)}.DEEP_PROMPT_DEPTH")
+        n_ctx = eval(f"cfg.TRAINER.{str.upper(cfg.TRAINER.NAME)}.N_CTX")
+        ctx_vectors = torch.empty(n_ctx, width)
+        nn.init.normal_(ctx_vectors, std=0.02)
+        self.visual_ctx = nn.Parameter(ctx_vectors)
+
+        self.visual_ctx_deep_prompts = nn.Parameter(torch.empty(self.deep_prompts_depth - 1, n_ctx, width))
+        nn.init.normal_(self.visual_ctx_deep_prompts, std=0.02)
+
+        self.visual_ctx_ln_intra_pre = LayerNorm(width)
+        self.visual_ctx_self_attn = LightTransformer(d_model=width, n_head=width // 64)
+        self.visual_ctx_ln_intra_post = LayerNorm(width)
+        self.visual_ctx_text_proj = nn.Linear(in_features=width, out_features=output_dim)
+
+        self.ln_pre = LayerNorm(width)
+        self.transformer = Transformer(width, layers, heads, cfg=cfg)
+        self.ln_post = LayerNorm(width)
+        self.proj = nn.Parameter(scale * torch.randn(width, output_dim))
+
+    def forward(self, x: torch.Tensor, shared_ctx, deeper_prompts):
+        x = self.conv1(x)  # shape = [*, width, grid, grid]
+        x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
+        x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]
+        x = torch.cat([self.class_embedding.to(x.dtype) + torch.zeros(x.shape[0], 1, x.shape[-1], dtype=x.dtype, device=x.device), x], dim=1)  # shape = [*, grid ** 2 + 1, width]
+        x = x + self.positional_embedding.to(x.dtype)
+
+        # add image prompts
+        visual_ctx = self.visual_ctx.unsqueeze(0)
+        shared_ctx = shared_ctx + visual_ctx
+        shared_ctx = shared_ctx.expand(x.shape[0], -1, -1).to(x.dtype).to(x.device)
+        # shared_ctx = shared_ctx.to(x.dtype) + torch.zeros(x.shape[0], shared_ctx.shape[1], shared_ctx.shape[2], dtype=x.dtype, device=x.device)
+        x = torch.cat([x, shared_ctx], dim=1)  # (16, 205, 768)
+        visual_deeper_prompts = deeper_prompts + self.visual_ctx_deep_prompts
+
+        # visual prompts to textual prompts
+        textual_prompts = self.visual_ctx_deep_prompts
+        textual_prompts = self.visual_ctx_ln_intra_pre(textual_prompts)
+        textual_prompts = textual_prompts.permute(1, 0, 2)
+        textual_prompts = self.visual_ctx_self_attn(textual_prompts)
+        textual_prompts = textual_prompts.permute(1, 0, 2)
+        textual_prompts = self.visual_ctx_ln_intra_post(textual_prompts)
+        textual_prompts = self.visual_ctx_text_proj(textual_prompts)
+
+        x = self.ln_pre(x)
+        x = x.permute(1, 0, 2)  # NLD -> LND
+        output = self.transformer([x, visual_deeper_prompts, 0])
+        x = output[0]
+        x = x.permute(1, 0, 2)  # LND -> NLD
+        x = self.ln_post(x[:, 0, :])
+
+        if self.proj is not None:
+            x = x @ self.proj
+
+        return x, textual_prompts
 
 
 class CLIP(nn.Module):
@@ -704,6 +820,17 @@ class CLIP(nn.Module):
 
                 elif cfg.TRAINER.NAME == "UMuDPT":
                     self.visual = VisionTransformer_UMuDPT(
+                        input_resolution=image_resolution,
+                        patch_size=vision_patch_size,
+                        width=vision_width,
+                        layers=vision_layers,
+                        heads=vision_heads,
+                        output_dim=embed_dim,
+                        cfg=cfg,
+                    )
+
+                elif cfg.TRAINER.NAME == "UUMuDPT":
+                    self.visual = VisionTransformer_UUMuDPT(
                         input_resolution=image_resolution,
                         patch_size=vision_patch_size,
                         width=vision_width,
