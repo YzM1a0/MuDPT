@@ -111,12 +111,6 @@ def extend_cfg(cfg):
     cfg.TRAINER.MPT.TEXT_CTX_INIT = "a photo of a"  # initialization words
     cfg.TRAINER.MPT.PREC = "fp16"  # fp16, fp32, amp
 
-    cfg.TRAINER.MAPLE = CfgNode()
-    cfg.TRAINER.MAPLE.N_CTX = 0
-    cfg.TRAINER.MAPLE.TEXT_CTX_INIT = "a photo of a"  # initialization words
-    cfg.TRAINER.MAPLE.DEEP_PROMPT_DEPTH = 0
-    cfg.TRAINER.MAPLE.PREC = "fp16"  # fp16, fp32, amp
-
     # MuDPT config
     cfg.TRAINER.MUDPT = CfgNode()
     cfg.TRAINER.MUDPT.N_CTX = 2
