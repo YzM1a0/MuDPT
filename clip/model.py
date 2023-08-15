@@ -1,9 +1,8 @@
 import sys
-sys.path.append("..")
+
 from collections import OrderedDict
 from typing import Tuple, Union
 from yacs.config import CfgNode
-import copy
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -11,6 +10,8 @@ from torch import nn
 
 from typing import Optional, List
 from trainers.uumudpt import LightTransformer
+
+sys.path.append("..")
 
 
 class Bottleneck(nn.Module):
@@ -300,58 +301,6 @@ class ResidualAttentionBlock_MuDPT(nn.Module):
         return [x, prompts, nth_layer]
 
 
-class ResidualAttentionBlock_MaPLe(nn.Module):
-    def __init__(self, d_model: int, n_head: int, attn_mask: torch.Tensor = None, i: int = 0, text_layer: bool = False, cfg: CfgNode = None):
-        super().__init__()
-        self.attn = nn.MultiheadAttention(d_model, n_head)
-        self.ln_1 = LayerNorm(d_model)
-        self.mlp = nn.Sequential(OrderedDict([
-            ("c_fc", nn.Linear(d_model, d_model * 4)),
-            ("gelu", QuickGELU()),
-            ("c_proj", nn.Linear(d_model * 4, d_model))
-        ]))
-        self.ln_2 = LayerNorm(d_model)
-        self.attn_mask = attn_mask
-
-        self.text_layer = text_layer
-        self.prompt_nctx = cfg.TRAINER.MAPLE.N_CTX
-        if i == 0:
-            self.first_layer = True
-        else:
-            self.first_layer = False
-
-    def attention(self, x: torch.Tensor):
-        self.attn_mask = self.attn_mask.to(dtype=x.dtype, device=x.device) if self.attn_mask is not None else None
-        return self.attn(x, x, x, need_weights=False, attn_mask=self.attn_mask)[0]
-
-    def forward(self, inputs):
-        x = inputs[0]  # text: (77, 100, 512)  visual: (201, 16, 768)
-        compound_prompts_deeper = inputs[1]
-        counter = inputs[2]
-        if not self.first_layer:
-            if len(compound_prompts_deeper) > 0:
-                if not self.text_layer:
-                    if not (counter > len(compound_prompts_deeper) - 1):
-                        prefix = x[0: x.shape[0] - self.prompt_nctx, :, :]
-                        visual_ctx = compound_prompts_deeper[counter]
-                        visual_ctx = visual_ctx.to(x.dtype) + torch.zeros(x.shape[1], visual_ctx.shape[0], visual_ctx.shape[1], dtype=x.dtype, device=x.device)
-                        visual_ctx = visual_ctx.permute(1, 0, 2)
-                        x = torch.cat([prefix, visual_ctx], dim=0)
-                        counter += 1
-                else:
-                    if not (counter > len(compound_prompts_deeper) - 1):
-                        prefix = x[:1, :, :]  # text: (1, 100, 512)
-                        suffix = x[1 + self.prompt_nctx:, :, :]
-                        text_ctx = compound_prompts_deeper[counter]
-                        text_ctx = text_ctx.to(x.dtype) + torch.zeros(x.shape[1], text_ctx.shape[0], text_ctx.shape[1], dtype=x.dtype, device=x.device)
-                        text_ctx = text_ctx.permute(1, 0, 2)
-                        x = torch.cat([prefix, text_ctx, suffix], dim=0)
-                        counter += 1
-        x = x + self.attention(self.ln_1(x))  # text: (77, 100, 512)
-        x = x + self.mlp(self.ln_2(x))
-        return [x, compound_prompts_deeper, counter]
-
-
 class ResidualAttentionBlock_UMuDPT(nn.Module):
     def __init__(self, d_model: int, n_head: int, attn_mask: torch.Tensor = None, nth_layer: int = 0, is_text_layer: bool = False, cfg: CfgNode = None):
         super().__init__()
@@ -469,11 +418,6 @@ class Transformer(nn.Module):
             elif trainer == "MuDPT":
                 self.resblocks = nn.Sequential(*[
                     ResidualAttentionBlock_MuDPT(width, heads, attn_mask, i, is_text_layer, cfg=cfg) for i in range(layers)
-                ])
-
-            elif trainer == "MaPLe":
-                self.resblocks = nn.Sequential(*[
-                    ResidualAttentionBlock_MaPLe(width, heads, attn_mask, i, is_text_layer, cfg=cfg) for i in range(layers)
                 ])
 
             elif trainer == "UMuDPT":

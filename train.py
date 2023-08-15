@@ -35,7 +35,6 @@ from trainers import (
     vpt,
     mpt,
     mudpt,
-    maple,
     umudpt,
     uumudpt,
 )
