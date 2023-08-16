@@ -10,7 +10,7 @@ This repository contains the official codes for ''[*Multi-modal Deep Prompt Tuni
 
 Yongzhu Miao, Shasha Li, Jintao Tang, Ting Wang. MuDPT: Multi-modal Deep Prompt Tuning for Large Pre-trained Vision-Language Models.
 
-![](img/mudpt.pdf)
+![](img/mudpt.png)
 
 ## How to use our code
 
