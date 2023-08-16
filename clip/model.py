@@ -706,17 +706,6 @@ class CLIP(nn.Module):
                         cfg=cfg,
                     )
 
-                elif cfg.TRAINER.NAME == "MaPLe":
-                    self.visual = VisionTransformer_MaPLe(
-                        input_resolution=image_resolution,
-                        patch_size=vision_patch_size,
-                        width=vision_width,
-                        layers=vision_layers,
-                        heads=vision_heads,
-                        output_dim=embed_dim,
-                        cfg=cfg,
-                    )
-
                 elif cfg.TRAINER.NAME == "UMuDPT":
                     self.visual = VisionTransformer_UMuDPT(
                         input_resolution=image_resolution,
