@@ -8,7 +8,7 @@ This repository contains the official codes for ''[*Multi-modal Deep Prompt Tuni
 
 🌟 [2023-3-12] Our paper is accepted by ICME 2023. 
 
-Yongzhu Miao, Shasha Li, Jintao Tang, Ting Wang. MuDPT: Multi-modal Deep Prompt Tuning for Large Pre-trained Vision-Language Models.
+ICME 2023: Yongzhu Miao, Shasha Li, Jintao Tang, Ting Wang. *MuDPT: Multi-modal Deep Prompt Tuning for Large Pre-trained Vision-Language Models*.
 
 ![](img/mudpt.png)
 
