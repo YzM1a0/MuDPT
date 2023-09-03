@@ -15,3 +15,17 @@ ICME 2023: Yongzhu Miao, Shasha Li, Jintao Tang, Ting Wang. *MuDPT: Multi-modal 
 ## How to use our code
 
 ## Citation
+
+If you're using MuDPT in your research or applications, please cite using this BibTeX:
+
+```bibtex
+@INPROCEEDINGS{10219840,
+  author={Miao, Yongzhu and Li, Shasha and Tang, Jintao and Wang, Ting},
+  booktitle={2023 IEEE International Conference on Multimedia and Expo (ICME)}, 
+  title={MuDPT: Multi-modal Deep-symphysis Prompt Tuning for Large Pre-trained Vision-Language Models}, 
+  year={2023},
+  volume={},
+  number={},
+  pages={25-30},
+  doi={10.1109/ICME55011.2023.00013}}
+```
